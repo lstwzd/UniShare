@@ -1,38 +1,48 @@
-# 网络配置
+mode: server
+server_ip: 192.168.1.100
 network:
-  static_ip: ""
-  port_range: "24800-24810"
-  mdns_service_name: "unishare.local"
+  static_ip: ''
+  port_range: 24800-24810
+  mdns_service_name: unishare
   broadcast_interval: 3000
-
-# 安全配置
+  stream_port: 24803
+  transfer_port: 24804
 security:
   tls_enabled: true
-  cert_path: ""
-  key_path: ""
+  cert_path: ''
+  key_path: ''
   allow_local_only: true
-
-# 键鼠共享配置
 input_share:
   enabled: true
-  mode: "client"
   screen_layout:
-    - name: "main-pc"
-      position: [0, 0]
-    - name: "second-pc"
-      position: [1, 0]
+  - name: main-pc
+    position:
+    - 0
+    - 0
+  - name: second-pc
+    position:
+    - 1
+    - 0
   mouse_smooth: true
   keyboard_sync: true
-
-# USB共享配置
 usb_share:
   enabled: true
   shared_devices: []
   auto_connect: false
-
-# 文件传输配置
-file_share:
-  temp_transfer_enabled: true
-  sync_folders: []
-  auto_accept: false
-  max_file_size: 104857600
+  shared_device_ids:
+  - e7755be5-f04d-4144-a0df-941ed78efd51
+  - 9db38e70-8384-4647-b8c3-e04dc04b1ea9
+screen_extend:
+  enabled: true
+  fps: 30
+  quality: 80
+  resolution:
+  - 1920
+  - 1080
+  extend_direction: right
+  auto_start: false
+drag_share:
+  enabled: true
+  auto_accept: true
+  save_path: ~/Downloads/UniShare
+  show_notification: true

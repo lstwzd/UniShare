@@ -23,5 +23,8 @@ class BaseModule(ABC):
     def log_info(self, msg: str):
         log.info(f"[{self.module_name}] {msg}")
 
+    def log_warning(self, msg: str):
+        log.warning(f"[{self.module_name}] {msg}")
+
     def log_error(self, msg: str):
         log.error(f"[{self.module_name}] {msg}")
