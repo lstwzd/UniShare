@@ -1,0 +1,38 @@
+# 网络配置
+network:
+  static_ip: ""
+  port_range: "24800-24810"
+  mdns_service_name: "unishare.local"
+  broadcast_interval: 3000
+
+# 安全配置
+security:
+  tls_enabled: true
+  cert_path: ""
+  key_path: ""
+  allow_local_only: true
+
+# 键鼠共享配置
+input_share:
+  enabled: true
+  mode: "client"
+  screen_layout:
+    - name: "main-pc"
+      position: [0, 0]
+    - name: "second-pc"
+      position: [1, 0]
+  mouse_smooth: true
+  keyboard_sync: true
+
+# USB共享配置
+usb_share:
+  enabled: true
+  shared_devices: []
+  auto_connect: false
+
+# 文件传输配置
+file_share:
+  temp_transfer_enabled: true
+  sync_folders: []
+  auto_accept: false
+  max_file_size: 104857600
