@@ -9,6 +9,12 @@ from typing import Dict, List, Optional, Callable
 from src.unishare.modules.base import BaseModule
 from src.unishare.core.config import config
 from src.unishare.core.logger import log
+from src.unishare.core.connection import connection_manager
+from src.unishare.modules.file_share.progress import (
+    TransferProgressTracker, TransferProgress, TransferState
+)
+from src.unishare.modules.file_share.resume import ResumableTransfer, TransferCheckpoint
+from src.unishare.modules.file_share.chunk import FileChunker, ChunkReceiver, ChunkInfo
 
 class FileShareModule(BaseModule):
     """文件传输模块 - 基于自定义 TCP 协议"""
@@ -23,6 +29,9 @@ class FileShareModule(BaseModule):
         self.connected_clients: List[socket.socket] = []
         self.transfer_dir = Path.home() / "UniShare" / "transfers"
         self.running_thread = None
+        self.progress_tracker = TransferProgressTracker()
+        self.resumable_transfer = ResumableTransfer()
+        self.file_chunker = FileChunker()
         
     def start(self):
         if not self.enabled:
@@ -172,15 +181,31 @@ class FileShareModule(BaseModule):
         filename = command.get("filename", "unknown")
         file_size = command.get("size", 0)
         save_path = command.get("save_path", str(self.transfer_dir))
+        transfer_id = command.get("transfer_id", str(uuid.uuid4()))
         
         try:
             save_path = Path(save_path)
             save_path.mkdir(parents=True, exist_ok=True)
             file_path = save_path / filename
             
-            # 接收文件数据
-            total_received = 0
+            progress = self.progress_tracker.create_transfer(
+                transfer_id, filename, str(file_path), file_size
+            )
+            
+            resume_pos = 0
+            if self.resumable_transfer.has_checkpoint(transfer_id):
+                resume_pos = self.resumable_transfer.get_resume_position(transfer_id)
+                if resume_pos > 0:
+                    self.log_info(f"断点续传: {filename} 从 {resume_pos} 字节继续")
+            
+            self.progress_tracker.start_transfer(transfer_id)
+            
+            total_received = resume_pos
             buffer_size = 8192
+            
+            if resume_pos > 0:
+                with open(file_path, 'ab') as f:
+                    pass
             
             while total_received < file_size:
                 to_read = min(buffer_size, file_size - total_received)
@@ -194,9 +219,16 @@ class FileShareModule(BaseModule):
                 
                 total_received += len(data)
                 
-                # 发送进度
+                self.progress_tracker.update_progress(transfer_id, total_received)
+                
+                chunk_index = total_received // self.file_chunker.chunk_size
+                self.resumable_transfer.update_checkpoint(
+                    transfer_id, total_received, chunk_index
+                )
+                
                 progress = {
                     "type": "upload_progress",
+                    "transfer_id": transfer_id,
                     "filename": filename,
                     "received": total_received,
                     "total": file_size,
@@ -204,20 +236,38 @@ class FileShareModule(BaseModule):
                 }
                 self._send_response(client, progress)
             
-            response = {
-                "type": "upload_result",
-                "success": True,
-                "path": str(file_path),
-                "message": f"文件上传成功：{filename}"
-            }
+            if total_received >= file_size:
+                self.progress_tracker.complete_transfer(transfer_id)
+                self.resumable_transfer.delete_checkpoint(transfer_id)
+                
+                response = {
+                    "type": "upload_result",
+                    "success": True,
+                    "transfer_id": transfer_id,
+                    "path": str(file_path),
+                    "message": f"文件上传成功：{filename}"
+                }
+            else:
+                self.progress_tracker.pause_transfer(transfer_id)
+                
+                response = {
+                    "type": "upload_paused",
+                    "transfer_id": transfer_id,
+                    "received": total_received,
+                    "message": f"传输暂停，可续传"
+                }
+            
             self._send_response(client, response)
             
         except Exception as e:
+            self.progress_tracker.fail_transfer(transfer_id, str(e))
             self._send_error(client, f"接收文件失败：{str(e)}")
     
     def _send_file(self, command: Dict, client: socket.socket):
         """发送下载的文件"""
         file_path = command.get("path", "")
+        transfer_id = command.get("transfer_id", str(uuid.uuid4()))
+        resume_pos = command.get("resume_pos", 0)
         
         try:
             path_obj = Path(file_path)
@@ -228,35 +278,51 @@ class FileShareModule(BaseModule):
             file_size = path_obj.stat().st_size
             filename = path_obj.name
             
-            # 发送文件信息
+            progress = self.progress_tracker.create_transfer(
+                transfer_id, filename, file_path, file_size
+            )
+            self.progress_tracker.start_transfer(transfer_id)
+            
             info = {
                 "type": "file_info",
+                "transfer_id": transfer_id,
                 "filename": filename,
-                "size": file_size
+                "size": file_size,
+                "chunk_size": self.file_chunker.chunk_size
             }
             self._send_response(client, info)
             
-            # 发送文件数据
             buffer_size = 8192
+            sent_size = resume_pos
+            
             with open(path_obj, 'rb') as f:
-                while True:
+                if resume_pos > 0:
+                    f.seek(resume_pos)
+                    self.log_info(f"断点续传: {filename} 从 {resume_pos} 字节继续")
+                
+                while sent_size < file_size:
                     data = f.read(buffer_size)
                     if not data:
                         break
                     
-                    # 发送数据长度 + 数据
-                    import struct
                     client.sendall(struct.pack('>I', len(data)))
                     client.sendall(data)
+                    
+                    sent_size += len(data)
+                    self.progress_tracker.update_progress(transfer_id, sent_size)
+            
+            self.progress_tracker.complete_transfer(transfer_id)
             
             response = {
                 "type": "download_result",
                 "success": True,
+                "transfer_id": transfer_id,
                 "message": f"文件发送完成：{filename}"
             }
             self._send_response(client, response)
             
         except Exception as e:
+            self.progress_tracker.fail_transfer(transfer_id, str(e))
             self._send_error(client, f"发送文件失败：{str(e)}")
     
     def _delete_file(self, command: Dict, client: socket.socket):

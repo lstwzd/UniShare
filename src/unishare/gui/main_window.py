@@ -18,6 +18,7 @@ from PySide6.QtGui import (
 )
 
 from src.unishare.core.discovery import discovery
+from src.unishare.core.connection import connection_manager
 from src.unishare.modules.input_share import InputLeapModule
 from src.unishare.modules.usb_share import USBShareModule
 from src.unishare.modules.screen_extend import ScreenExtendModule
@@ -127,6 +128,17 @@ class MainWindow(QMainWindow):
         self.extend_timer.timeout.connect(self._update_extend_status)
         self.extend_timer.start(2000)
 
+        # 连接状态定时器
+        self.connection_timer = QTimer()
+        self.connection_timer.timeout.connect(self._update_connection_status)
+        self.connection_timer.start(3000)
+        
+        # 设置连接管理器回调
+        connection_manager.set_callbacks(
+            on_disconnect=self._on_connection_disconnect,
+            on_reconnect=self._on_connection_reconnect
+        )
+
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -182,6 +194,29 @@ class MainWindow(QMainWindow):
         self.status_label.setFont(QFont("Microsoft YaHei", 9))
         self.status_label.setStyleSheet("color: #666; padding: 5px;")
         layout.addWidget(self.status_label)
+
+        # 连接状态区域
+        conn_group = QGroupBox("连接状态")
+        conn_layout = QGridLayout()
+        
+        self.conn_input_label = QLabel("键鼠共享: ● 未连接")
+        self.conn_input_label.setStyleSheet("color: #999;")
+        conn_layout.addWidget(self.conn_input_label, 0, 0)
+        
+        self.conn_screen_label = QLabel("扩展屏: ● 未连接")
+        self.conn_screen_label.setStyleSheet("color: #999;")
+        conn_layout.addWidget(self.conn_screen_label, 0, 1)
+        
+        self.conn_usb_label = QLabel("USB共享: ● 未连接")
+        self.conn_usb_label.setStyleSheet("color: #999;")
+        conn_layout.addWidget(self.conn_usb_label, 1, 0)
+        
+        self.conn_file_label = QLabel("文件传输: ● 未连接")
+        self.conn_file_label.setStyleSheet("color: #999;")
+        conn_layout.addWidget(self.conn_file_label, 1, 1)
+        
+        conn_group.setLayout(conn_layout)
+        layout.addWidget(conn_group)
 
         self.tabs.addTab(page, "🔍 设备发现")
 
@@ -240,6 +275,87 @@ class MainWindow(QMainWindow):
 
         status_group.setLayout(status_layout)
         layout.addWidget(status_group)
+
+        virtual_display_group = QGroupBox("虚拟显示器")
+        virtual_display_layout = QGridLayout()
+        
+        self.vd_available_label = QLabel("状态: 检测中...")
+        virtual_display_layout.addWidget(self.vd_available_label, 0, 0, 1, 3)
+        
+        vd_res_label = QLabel("分辨率:")
+        vd_res_label.setFont(QFont("Microsoft YaHei", 10))
+        virtual_display_layout.addWidget(vd_res_label, 1, 0)
+        
+        self.vd_resolution_combo = QComboBox()
+        self.vd_resolution_combo.setFont(QFont("Microsoft YaHei", 10))
+        self.vd_resolution_combo.addItems(["1920x1080", "2560x1440", "3840x2160", "1280x720"])
+        virtual_display_layout.addWidget(self.vd_resolution_combo, 1, 1)
+        
+        self.create_vd_btn = QPushButton("创建虚拟屏")
+        self.create_vd_btn.setFont(QFont("Microsoft YaHei", 10))
+        self.create_vd_btn.setStyleSheet(self._get_green_button_style())
+        self.create_vd_btn.clicked.connect(self._create_virtual_display)
+        virtual_display_layout.addWidget(self.create_vd_btn, 1, 2)
+        
+        self.destroy_vd_btn = QPushButton("销毁虚拟屏")
+        self.destroy_vd_btn.setFont(QFont("Microsoft YaHei", 10))
+        self.destroy_vd_btn.setStyleSheet(self._get_red_button_style())
+        self.destroy_vd_btn.clicked.connect(self._destroy_virtual_display)
+        self.destroy_vd_btn.setEnabled(False)
+        virtual_display_layout.addWidget(self.destroy_vd_btn, 2, 2)
+        
+        self.vd_info_label = QLabel("")
+        self.vd_info_label.setStyleSheet("color: #666;")
+        virtual_display_layout.addWidget(self.vd_info_label, 2, 0, 1, 2)
+        
+        virtual_display_group.setLayout(virtual_display_layout)
+        layout.addWidget(virtual_display_group)
+        
+        self._update_virtual_display_status()
+
+        extend_settings_group = QGroupBox("扩展屏设置")
+        extend_settings_layout = QGridLayout()
+        extend_settings_layout.setSpacing(12)
+        
+        extend_settings_layout.addWidget(QLabel("帧率 (FPS):"), 0, 0)
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(1, 60)
+        self.fps_spin.setValue(config.get("screen_extend.fps", 30))
+        self.fps_spin.setFont(QFont("Microsoft YaHei", 10))
+        self.fps_spin.setMinimumHeight(32)
+        extend_settings_layout.addWidget(self.fps_spin, 0, 1)
+        
+        extend_settings_layout.addWidget(QLabel("画质 (1-100):"), 0, 2)
+        self.quality_spin = QSpinBox()
+        self.quality_spin.setRange(1, 100)
+        self.quality_spin.setValue(config.get("screen_extend.quality", 80))
+        self.quality_spin.setFont(QFont("Microsoft YaHei", 10))
+        self.quality_spin.setMinimumHeight(32)
+        extend_settings_layout.addWidget(self.quality_spin, 0, 3)
+        
+        extend_settings_layout.addWidget(QLabel("扩展方向:"), 1, 0)
+        self.direction_combo = QComboBox()
+        self.direction_combo.addItems(["right", "left", "top", "bottom"])
+        self.direction_combo.setCurrentText(config.get("screen_extend.extend_direction", "right"))
+        self.direction_combo.setFont(QFont("Microsoft YaHei", 10))
+        self.direction_combo.setMinimumHeight(32)
+        extend_settings_layout.addWidget(self.direction_combo, 1, 1)
+        
+        extend_settings_layout.addWidget(QLabel("推流显示器:"), 1, 2)
+        self.monitor_combo = QComboBox()
+        self._populate_monitors()
+        self.monitor_combo.setFont(QFont("Microsoft YaHei", 10))
+        self.monitor_combo.setMinimumHeight(32)
+        extend_settings_layout.addWidget(self.monitor_combo, 1, 3)
+        
+        apply_btn = QPushButton("应用设置")
+        apply_btn.setFont(QFont("Microsoft YaHei", 10))
+        apply_btn.setStyleSheet(self._get_blue_button_style())
+        apply_btn.clicked.connect(self._apply_screen_settings)
+        extend_settings_layout.addWidget(apply_btn, 2, 0, 1, 4)
+        
+        extend_settings_group.setLayout(extend_settings_layout)
+        layout.addWidget(extend_settings_group)
 
         # 操作按钮
         btn_layout = QHBoxLayout()
@@ -302,6 +418,26 @@ class MainWindow(QMainWindow):
 
         drag_group.setLayout(drag_layout)
         layout.addWidget(drag_group)
+
+        progress_group = QGroupBox("文件传输进度")
+        progress_layout = QVBoxLayout()
+        
+        self.transfer_list = QListWidget()
+        self.transfer_list.setFont(QFont("Microsoft YaHei", 9))
+        self.transfer_list.setStyleSheet(self._get_list_widget_style())
+        self.transfer_list.setMaximumHeight(150)
+        progress_layout.addWidget(self.transfer_list)
+        
+        self.transfer_stats_label = QLabel("无活动传输")
+        self.transfer_stats_label.setStyleSheet("color: #888;")
+        progress_layout.addWidget(self.transfer_stats_label)
+        
+        progress_group.setLayout(progress_layout)
+        layout.addWidget(progress_group)
+        
+        self.transfer_timer = QTimer()
+        self.transfer_timer.timeout.connect(self._update_transfer_progress)
+        self.transfer_timer.start(1000)
 
         self.tabs.addTab(page, "🖥️ 扩展屏")
 
@@ -413,6 +549,15 @@ class MainWindow(QMainWindow):
 
     # ============ 设置 Tab ============
 
+    def _populate_monitors(self):
+        """填充显示器选择下拉框"""
+        self.monitor_combo.clear()
+        monitors = self.screen_extend.get_monitors()
+        for mon in monitors:
+            self.monitor_combo.addItem(f"显示器 {mon['index']}: {mon['resolution']}")
+        if monitors:
+            self.monitor_combo.setCurrentIndex(0)
+
     def init_setting_tab(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -465,40 +610,6 @@ class MainWindow(QMainWindow):
         network_group.setLayout(network_layout)
         layout.addWidget(network_group)
 
-        # 扩展屏设置
-        extend_group = QGroupBox("扩展屏设置")
-        extend_group.setFont(FONT_BOLD)
-        extend_layout = QGridLayout()
-        extend_layout.setSpacing(12)
-
-        extend_layout.addWidget(QLabel("帧率 (FPS):"), 0, 0)
-        self.fps_spin = QSpinBox()
-        self.fps_spin.setRange(1, 60)
-        self.fps_spin.setValue(config.get("screen_extend.fps", 30))
-        self.fps_spin.setFont(FONT)
-        self.fps_spin.setMinimumHeight(36)
-        extend_layout.addWidget(self.fps_spin, 0, 1)
-
-        extend_layout.addWidget(QLabel("画质 (1-100):"), 0, 2)
-        self.quality_spin = QSpinBox()
-        self.quality_spin.setRange(1, 100)
-        self.quality_spin.setValue(config.get("screen_extend.quality", 80))
-        self.quality_spin.setFont(FONT)
-        self.quality_spin.setMinimumHeight(36)
-        extend_layout.addWidget(self.quality_spin, 0, 3)
-
-        extend_layout.addWidget(QLabel("扩展方向:"), 1, 0)
-        self.direction_combo = QComboBox()
-        self.direction_combo.addItems(["right", "left", "top", "bottom"])
-        self.direction_combo.setCurrentText(config.get("screen_extend.extend_direction", "right"))
-        self.direction_combo.setFont(FONT)
-        self.direction_combo.setMinimumHeight(36)
-        extend_layout.addWidget(self.direction_combo, 1, 1)
-
-        extend_group.setLayout(extend_layout)
-        layout.addWidget(extend_group)
-
-        # 模块开关
         module_group = QGroupBox("模块开关")
         module_group.setFont(FONT_BOLD)
         module_layout = QGridLayout()
@@ -608,6 +719,108 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "发送失败", f"文件 {file_path} 发送失败")
 
+    def _update_transfer_progress(self):
+        """更新传输进度显示"""
+        try:
+            from src.unishare.modules.file_share import FileShareModule
+            if hasattr(self, 'file_module'):
+                tracker = self.file_module.progress_tracker
+                transfers = tracker.get_all_transfers()
+                
+                self.transfer_list.clear()
+                
+                active_count = 0
+                for transfer_id, progress in transfers.items():
+                    if progress.state.value in ["in_progress", "pending"]:
+                        active_count += 1
+                        percent = round(progress.percent, 1)
+                        speed = round(progress.speed / 1024, 1) if progress.speed > 0 else 0
+                        item_text = f"{progress.filename}: {percent}% | {speed} KB/s"
+                        item = QListWidgetItem(item_text)
+                        self.transfer_list.addItem(item)
+                
+                stats = tracker.get_stats()
+                if active_count > 0:
+                    self.transfer_stats_label.setText(
+                        f"活动传输: {active_count} | "
+                        f"已完成: {stats['completed']} | "
+                        f"失败: {stats['failed']}"
+                    )
+                else:
+                    self.transfer_stats_label.setText("无活动传输")
+        except Exception:
+            pass
+    
+    def _update_virtual_display_status(self):
+        """更新虚拟显示器状态"""
+        available = self.screen_extend.is_virtual_display_available()
+        platform = self.screen_extend.virtual_display_manager.platform_name
+        
+        if available:
+            self.vd_available_label.setText(f"状态: ✓ 可用 (平台: {platform})")
+            self.vd_available_label.setStyleSheet("color: green;")
+            self.create_vd_btn.setEnabled(True)
+        else:
+            self.vd_available_label.setText(f"状态: ✗ 不可用 (平台: {platform})")
+            self.vd_available_label.setStyleSheet("color: #999;")
+            self.create_vd_btn.setEnabled(False)
+        
+        info = self.screen_extend.get_virtual_display_info()
+        if info:
+            self.vd_info_label.setText(f"已创建: {info['resolution']} @ ({info['position_x']}, {info['position_y']})")
+            self.create_vd_btn.setEnabled(False)
+            self.destroy_vd_btn.setEnabled(True)
+        else:
+            self.vd_info_label.setText("")
+            self.destroy_vd_btn.setEnabled(False)
+    
+    def _create_virtual_display(self):
+        """创建虚拟显示器"""
+        res_text = self.vd_resolution_combo.currentText()
+        parts = res_text.split('x')
+        width = int(parts[0])
+        height = int(parts[1])
+        
+        display_id = self.screen_extend.create_virtual_display(width, height)
+        
+        if display_id is not None:
+            QMessageBox.information(self, "成功", f"虚拟显示器创建成功\n分辨率: {width}x{height}")
+            self._update_virtual_display_status()
+        else:
+            QMessageBox.warning(self, "失败", "虚拟显示器创建失败")
+    
+    def _destroy_virtual_display(self):
+        """销毁虚拟显示器"""
+        result = self.screen_extend.destroy_virtual_display()
+        
+        if result:
+            QMessageBox.information(self, "成功", "虚拟显示器已销毁")
+            self._update_virtual_display_status()
+        else:
+            QMessageBox.warning(self, "失败", "虚拟显示器销毁失败")
+    
+    def _apply_screen_settings(self):
+        """应用扩展屏设置"""
+        fps = self.fps_spin.value()
+        quality = self.quality_spin.value()
+        direction = self.direction_combo.currentText()
+        monitor_index = self.monitor_combo.currentIndex()
+        
+        config.set("screen_extend.fps", fps)
+        config.set("screen_extend.quality", quality)
+        config.set("screen_extend.extend_direction", direction)
+        config.set("screen_extend.selected_monitor", monitor_index + 1)
+        config.save()
+        
+        self.screen_extend.fps = fps
+        self.screen_extend.quality = quality
+        self.screen_extend.extend_direction = direction
+        
+        if self.screen_extend.mode == "server":
+            self.screen_extend.select_monitor(monitor_index + 1)
+        
+        QMessageBox.information(self, "成功", "扩展屏设置已应用")
+
     # ============ 设备发现 ============
 
     def manual_refresh(self):
@@ -657,10 +870,6 @@ class MainWindow(QMainWindow):
 
             config.set("network.mdns_service_name", self.service_name_input.text())
             config.set("network.port_range", self.port_range_input.text())
-
-            config.set("screen_extend.fps", self.fps_spin.value())
-            config.set("screen_extend.quality", self.quality_spin.value())
-            config.set("screen_extend.extend_direction", self.direction_combo.currentText())
 
             config.set("input_share.enabled", self.input_enable_checkbox.isChecked())
             config.set("screen_extend.enabled", self.screen_enable_checkbox.isChecked())
@@ -786,3 +995,40 @@ class MainWindow(QMainWindow):
                 background-color: #e3f2fd;
             }
         """
+
+    def _update_connection_status(self):
+        """更新连接状态显示"""
+        states = connection_manager.get_all_states()
+        
+        for name, label in [
+            ("input_share", self.conn_input_label),
+            ("screen_extend", self.conn_screen_label),
+            ("usb_share", self.conn_usb_label),
+            ("file_share", self.conn_file_label),
+        ]:
+            state = states.get(name)
+            if state:
+                if state.value == "connected":
+                    label.setText(f"{name}: ● 已连接")
+                    label.setStyleSheet("color: green;")
+                elif state.value == "reconnecting":
+                    label.setText(f"{name}: ◐ 重连中...")
+                    label.setStyleSheet("color: orange;")
+                else:
+                    label.setText(f"{name}: ○ 未连接")
+                    label.setStyleSheet("color: #999;")
+            else:
+                label.setText(f"{name}: ○ 未连接")
+                label.setStyleSheet("color: #999;")
+
+    def _on_connection_disconnect(self, name: str):
+        """连接断开回调"""
+        log.warning(f"连接断开: {name}")
+        self.status_label.setText(f"⚠️ {name} 连接已断开，正在尝试重连...")
+        self.status_label.setStyleSheet("color: orange; padding: 5px;")
+
+    def _on_connection_reconnect(self, name: str):
+        """连接重连成功回调"""
+        log.info(f"连接重连成功: {name}")
+        self.status_label.setText(f"✓ {name} 重连成功")
+        self.status_label.setStyleSheet("color: green; padding: 5px;")

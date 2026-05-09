@@ -30,8 +30,7 @@ usb_share:
   shared_devices: []
   auto_connect: false
   shared_device_ids:
-  - e7755be5-f04d-4144-a0df-941ed78efd51
-  - 9db38e70-8384-4647-b8c3-e04dc04b1ea9
+  - cb0204db-de6f-4e12-8505-a2c8cd6ede4c
 screen_extend:
   enabled: true
   fps: 30

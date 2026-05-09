@@ -5,12 +5,19 @@ import struct
 import io
 import json
 import numpy as np
-from typing import Optional
+from typing import Optional, Dict
 from pathlib import Path
 
 from src.unishare.modules.base import BaseModule
 from src.unishare.core.config import config
 from src.unishare.core.logger import log
+from src.unishare.core.connection import connection_manager
+from src.unishare.modules.screen_extend.bitrate import AdaptiveBitrateController
+from src.unishare.modules.screen_extend.monitor import MultiMonitorManager
+from src.unishare.modules.screen_extend.recovery import FrameRecovery
+from src.unishare.modules.screen_extend.virtual_display import (
+    VirtualDisplayManager, VirtualDisplayState, virtual_display_manager
+)
 
 try:
     import mss
@@ -26,6 +33,7 @@ except ImportError:
 class ScreenExtendModule(BaseModule):
     """
     扩展屏模块 - 服务端捕获屏幕推流 + 客户端接收渲染 + 拖拽文件接收
+    支持自适应码率、多显示器选择和虚拟显示器
     """
 
     def __init__(self):
@@ -48,12 +56,25 @@ class ScreenExtendModule(BaseModule):
         self.file_received_callback = None
         self.stream_thread = None
         self.transfer_thread = None
+        
+        self.bitrate_controller = AdaptiveBitrateController(self.quality, self.fps)
+        self.monitor_manager = MultiMonitorManager()
+        self.frame_recovery = FrameRecovery(self.stream_port)
+        self.virtual_display_manager = virtual_display_manager
+        self._virtual_display_id: Optional[int] = None
+        self._last_frame_time = 0
+        self._frame_count = 0
 
     def start(self):
         if not self.enabled:
             self.log_info("扩展屏功能已关闭")
             return
         self.is_running = True
+        
+        self.monitor_manager.scan_monitors()
+        monitors = self.monitor_manager.get_all_monitors()
+        self.log_info(f"检测到 {len(monitors)} 个显示器: {monitors}")
+        connection_manager.start()
 
         if self.mode == "server":
             self._start_stream_server()
@@ -63,8 +84,93 @@ class ScreenExtendModule(BaseModule):
 
         self.log_info(f"扩展屏模块启动成功 (模式：{self.mode})")
 
+    def select_monitor(self, index: int) -> bool:
+        """选择要推流的显示器"""
+        result = self.monitor_manager.select_monitor(index)
+        if result:
+            mon = self.monitor_manager.get_selected_monitor()
+            self.log_info(f"选择显示器 {index}: {mon.resolution if mon else 'N/A'}")
+        return result
+
+    def get_monitors(self) -> list:
+        """获取所有显示器信息"""
+        return self.monitor_manager.get_all_monitors()
+
+    def get_bitrate_stats(self) -> dict:
+        """获取码率统计信息"""
+        return self.bitrate_controller.get_stats()
+    
+    def create_virtual_display(self, width: int = 1920, height: int = 1080,
+                               refresh_rate: int = 60) -> Optional[int]:
+        """
+        创建虚拟显示器作为扩展屏
+        
+        Args:
+            width: 显示器宽度
+            height: 显示器高度
+            refresh_rate: 刷新率
+        
+        Returns:
+            虚拟显示器 ID 或 None
+        """
+        if not self.virtual_display_manager.available:
+            self.log_warning(f"虚拟显示器不可用 (平台: {self.virtual_display_manager.platform_name})")
+            return None
+        
+        if self._virtual_display_id is not None:
+            self.log_warning("已存在虚拟显示器，请先销毁")
+            return None
+        
+        info = self.virtual_display_manager.create_display(
+            width=width, height=height, refresh_rate=refresh_rate
+        )
+        
+        if info:
+            self._virtual_display_id = info.display_id
+            self.virtual_display_manager.activate_display(info.display_id)
+            self.log_info(f"虚拟显示器创建成功: {info.width}x{info.height} @ {info.position_x},{info.position_y}")
+            return info.display_id
+        
+        self.log_error("虚拟显示器创建失败")
+        return None
+    
+    def destroy_virtual_display(self) -> bool:
+        """销毁虚拟显示器"""
+        if self._virtual_display_id is None:
+            return True
+        
+        result = self.virtual_display_manager.destroy_display(self._virtual_display_id)
+        if result:
+            self.log_info(f"虚拟显示器已销毁: {self._virtual_display_id}")
+            self._virtual_display_id = None
+        else:
+            self.log_error(f"虚拟显示器销毁失败: {self._virtual_display_id}")
+        
+        return result
+    
+    def get_virtual_display_info(self) -> Optional[Dict]:
+        """获取虚拟显示器信息"""
+        if self._virtual_display_id is None:
+            return None
+        
+        info = self.virtual_display_manager.get_display(self._virtual_display_id)
+        return info.to_dict() if info else None
+    
+    def is_virtual_display_available(self) -> bool:
+        """检查虚拟显示器功能是否可用"""
+        return self.virtual_display_manager.available
+    
+    def get_supported_resolutions(self) -> list:
+        """获取支持的虚拟显示器分辨率"""
+        return self.virtual_display_manager.get_supported_resolutions()
+
     def stop(self):
         self.is_running = False
+        connection_manager.unregister_connection("screen_extend")
+        
+        if self._virtual_display_id is not None:
+            self.destroy_virtual_display()
+        
         if self.server_socket:
             try:
                 self.server_socket.close()
@@ -89,6 +195,7 @@ class ScreenExtendModule(BaseModule):
             self.stream_thread.join(timeout=2)
         if self.transfer_thread and self.transfer_thread.is_alive():
             self.transfer_thread.join(timeout=2)
+        self.frame_recovery.stop()
         self.log_info("扩展屏模块已停止")
 
     def set_preview_callback(self, callback):
@@ -106,6 +213,7 @@ class ScreenExtendModule(BaseModule):
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.server_socket.bind(("0.0.0.0", self.stream_port))
+            self.frame_recovery.start_server()
             self.log_info(f"屏幕推流服务启动，端口: {self.stream_port}")
 
             def stream_loop():
@@ -114,17 +222,21 @@ class ScreenExtendModule(BaseModule):
                     return
 
                 self.sct = mss.mss()
-                frame_interval = 1.0 / self.fps
-                monitor = self.sct.monitors[1]  # 主显示器
-
-                self.log_info(f"开始捕获屏幕: {monitor}")
+                
+                capture_region = self.monitor_manager.get_capture_region()
+                if not capture_region:
+                    capture_region = self.sct.monitors[1] if self.sct.monitors else {"left": 0, "top": 0, "width": 1920, "height": 1080}
+                
+                self.log_info(f"开始捕获屏幕: {capture_region}")
 
                 client_addr = None
+                last_stats_time = time.time()
 
                 while self.is_running:
+                    current_quality, current_fps = self.bitrate_controller.get_quality_settings()
+                    frame_interval = 1.0 / current_fps
                     start = time.time()
                     try:
-                        # 等待客户端发送请求（包含地址信息）
                         self.server_socket.settimeout(0.1)
                         try:
                             data, addr = self.server_socket.recvfrom(1024)
@@ -132,25 +244,43 @@ class ScreenExtendModule(BaseModule):
                                 client_addr = addr
                                 self.server_socket.sendto(b"OK", addr)
                                 self.log_info(f"推流客户端已连接: {addr}")
+                            elif data.startswith(b"STATS"):
+                                try:
+                                    parts = data.decode().split(":")
+                                    if len(parts) >= 3:
+                                        latency = float(parts[1])
+                                        loss = float(parts[2])
+                                        self.bitrate_controller.update_metrics(latency, loss)
+                                except:
+                                    pass
                         except socket.timeout:
                             pass
 
                         if not client_addr:
                             continue
 
-                        # 捕获屏幕
-                        img = self.sct.grab(monitor)
+                        capture_region = self.monitor_manager.get_capture_region()
+                        if not capture_region:
+                            capture_region = self.sct.monitors[1] if self.sct.monitors else {"left": 0, "top": 0, "width": 1920, "height": 1080}
+                        
+                        img = self.sct.grab(capture_region)
                         img_np = np.array(img)
                         img_pil = Image.fromarray(img_np)
 
-                        # JPEG 压缩
                         buf = io.BytesIO()
-                        img_pil.save(buf, format="JPEG", quality=self.quality)
+                        img_pil.save(buf, format="JPEG", quality=current_quality)
                         img_bytes = buf.getvalue()
 
-                        # 发送数据长度 + JPEG 数据
-                        packet = struct.pack(">I", len(img_bytes)) + img_bytes
+                        frame_id = self._frame_count % 65536
+                        packet = struct.pack(">IH", len(img_bytes), frame_id) + img_bytes
                         self.server_socket.sendto(packet, client_addr)
+                        self.frame_recovery.buffer_frame(frame_id, img_bytes)
+                        self._frame_count += 1
+
+                        if time.time() - last_stats_time > 2.0:
+                            stats = self.bitrate_controller.get_stats()
+                            self.log_info(f"推流统计: Q={stats['quality']} FPS={stats['fps']} Latency={stats['avg_latency_ms']}ms")
+                            last_stats_time = time.time()
 
                     except socket.timeout:
                         continue
@@ -177,9 +307,14 @@ class ScreenExtendModule(BaseModule):
         try:
             self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.log_info(f"连接推流服务器: {self.server_ip}:{self.stream_port}")
+            
+            def on_recovered_frame(frame_id: int, frame_data: bytes):
+                if self.preview_callback:
+                    self.preview_callback(frame_data)
+            
+            self.frame_recovery.start_client(self.server_ip, on_recovered_frame)
 
             def recv_loop():
-                # 发送 HELLO 握手
                 try:
                     self.client_socket.sendto(b"HELLO", (self.server_ip, self.stream_port))
                     self.client_socket.settimeout(2)
@@ -193,25 +328,47 @@ class ScreenExtendModule(BaseModule):
                     return
 
                 self.client_socket.settimeout(1.0)
+                last_frame_time = time.time()
+                frame_count = 0
+                last_stats_time = time.time()
 
                 while self.is_running:
                     try:
-                        # 接收长度（4 字节）
-                        length_data, addr = self.client_socket.recvfrom(4)
-                        if len(length_data) < 4:
+                        length_data, addr = self.client_socket.recvfrom(6)
+                        if len(length_data) < 6:
                             continue
 
-                        length = struct.unpack(">I", length_data)[0]
+                        length = struct.unpack(">I", length_data[:4])[0]
+                        frame_id = struct.unpack(">H", length_data[4:6])[0]
 
-                        # 接收 JPEG 数据
+                        self.frame_recovery.check_frame(frame_id)
+
                         img_data = b""
                         while len(img_data) < length:
                             chunk, _ = self.client_socket.recvfrom(65535)
                             img_data += chunk
 
-                        # 回调通知 GUI 渲染
                         if self.preview_callback:
                             self.preview_callback(img_data)
+
+                        frame_count += 1
+                        current_time = time.time()
+                        
+                        if current_time - last_stats_time >= 2.0:
+                            elapsed = current_time - last_stats_time
+                            fps = frame_count / elapsed
+                            latency = (current_time - last_frame_time) * 1000
+                            
+                            try:
+                                stats_msg = f"STATS:{latency:.1f}:0.0"
+                                self.client_socket.sendto(stats_msg.encode(), (self.server_ip, self.stream_port))
+                            except:
+                                pass
+                            
+                            frame_count = 0
+                            last_stats_time = current_time
+                        
+                        last_frame_time = current_time
 
                     except socket.timeout:
                         continue

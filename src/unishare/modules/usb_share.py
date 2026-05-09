@@ -9,7 +9,9 @@ from typing import Dict, List, Optional
 from src.unishare.modules.base import BaseModule
 from src.unishare.core.config import config
 from src.unishare.core.logger import log
+from src.unishare.core.connection import connection_manager
 from src.unishare.utils.usbip import backend, scan_usb_devices
+from src.unishare.utils.usbip.sync import USBDeviceSync, DeviceState
 
 
 class USBShareModule(BaseModule):
@@ -29,6 +31,7 @@ class USBShareModule(BaseModule):
         self.shared_devices: List[Dict] = []
         self._shared_ids: set = set(config.get("usb_share.shared_device_ids", []))
         self.running_thread = None
+        self.device_sync = USBDeviceSync(self.usbip_port)
         
     def start(self):
         if not self.enabled:
@@ -36,15 +39,15 @@ class USBShareModule(BaseModule):
             return
         self.is_running = True
         
-        # 加载 USB/IP 后端
         self._check_backend()
         
         if self.mode == "server":
+            self.device_sync.start_server()
             self._start_server()
         else:
+            self.device_sync.start_client(self.server_ip, self._on_device_state_change)
             self._start_client()
         
-        # 扫描本机 USB 设备
         self._scan_devices()
             
         self.log_info(f"USB 共享模块启动成功 (模式：{self.mode})")
@@ -55,6 +58,14 @@ class USBShareModule(BaseModule):
             self.log_info(f"USB/IP 后端: {backend.get_backend_name()}")
         else:
             self.log_info("USB/IP 后端未加载，使用系统扫描")
+    
+    def _on_device_state_change(self, busid: str, new_state: DeviceState, old_state: Optional[DeviceState]):
+        """设备状态变更回调"""
+        self.log_info(f"设备 {busid} 状态变更: {old_state.value if old_state else 'N/A'} -> {new_state.value}")
+        
+        for dev in self.shared_devices:
+            if dev.get("busid") == busid:
+                dev["state"] = new_state.value
     
     def _scan_devices(self):
         """扫描本机 USB 设备"""
@@ -72,9 +83,11 @@ class USBShareModule(BaseModule):
                     "manufacturer": dev.get("manufacturer", ""),
                     "serial": dev.get("serial", ""),
                     "platform": platform.system().lower(),
-                    "backend": backend.get_backend_name()
+                    "backend": backend.get_backend_name(),
+                    "state": DeviceState.CONNECTED.value
                 }
                 self.shared_devices.append(device_entry)
+                self.device_sync.update_device_state(device_entry["busid"], DeviceState.CONNECTED)
             
             self.log_info(f"扫描到 {len(self.shared_devices)} 个 USB 设备")
 
@@ -97,8 +110,8 @@ class USBShareModule(BaseModule):
 
     def stop(self):
         self.is_running = False
+        self.device_sync.stop()
         
-        # 停止 USB/IP 后端服务
         if self.mode == "server":
             backend.stop_server()
         
@@ -223,24 +236,15 @@ class USBShareModule(BaseModule):
         message = ""
         
         if self.mode == "server":
-            # 服务端: 导出本地 USB 设备
-            if busid:
-                success = backend.export_device(busid)
-                message = f"设备 {busid} 已导出" if success else f"导出设备 {busid} 失败"
-            else:
-                # 查找设备的 busid
-                for dev in self.shared_devices:
-                    if dev["id"] == device_id:
-                        busid = dev.get("busid", "")
-                        if busid:
-                            success = backend.export_device(busid)
-                            message = f"设备 {dev['name']} 已导出" if success else f"导出失败"
-                        break
+            success = backend.export_device(busid)
+            message = f"设备 {busid} 已导出" if success else f"导出设备 {busid} 失败"
+            if success:
+                self.device_sync.update_device_state(busid, DeviceState.EXPORTED)
         else:
-            # 客户端: 连接远程 USB 设备
-            import struct
             success = backend.attach_device(self.server_ip, busid)
             message = f"远程设备已连接" if success else f"连接远程设备失败"
+            if success:
+                self.device_sync.update_device_state(busid, DeviceState.ATTACHED)
         
         response = {
             "type": "mount_result",
@@ -255,8 +259,18 @@ class USBShareModule(BaseModule):
     def _unmount_usb_device(self, device_id: str, port: int, client: socket.socket):
         """卸载 USB 设备"""
         success = False
+        busid = None
+        
+        for dev in self.shared_devices:
+            if dev["id"] == device_id:
+                busid = dev.get("busid")
+                break
+        
         if port > 0:
             success = backend.detach_device(port)
+        
+        if success and busid:
+            self.device_sync.update_device_state(busid, DeviceState.CONNECTED)
         
         response = {
             "type": "unmount_result",

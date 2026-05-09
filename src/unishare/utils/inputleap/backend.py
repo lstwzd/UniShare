@@ -34,11 +34,15 @@ class InputLeapBackend:
                 if self._running:
                     callback({"type": "mouse_move", "x": x, "y": y})
 
-            def on_click(x, y, button):
+            def on_click(x, y, button, pressed):
                 if self._running:
                     from pynput.mouse import Button
                     name = "left" if button == Button.left else ("right" if button == Button.right else "middle")
-                    callback({"type": "mouse_click", "x": x, "y": y, "button": name})
+                    callback({"type": "mouse_click", "x": x, "y": y, "button": name, "pressed": pressed})
+
+            def on_scroll(x, y, dx, dy):
+                if self._running:
+                    callback({"type": "mouse_scroll", "x": x, "y": y, "dx": dx, "dy": dy})
 
             def on_press(key):
                 if self._running:
@@ -57,7 +61,7 @@ class InputLeapBackend:
                         pass
 
             self._keyboard_listener = KListener(on_press=on_press, on_release=on_release)
-            self._mouse_listener = MListener(on_move=on_move, on_click=on_click)
+            self._mouse_listener = MListener(on_move=on_move, on_click=on_click, on_scroll=on_scroll)
             self._keyboard_listener.start()
             self._mouse_listener.start()
             return True
@@ -95,7 +99,23 @@ class InputLeapBackend:
             elif cmd_type == "mouse_click":
                 btn_map = {"left": Button.left, "right": Button.right, "middle": Button.middle}
                 btn = btn_map.get(command.get("button", "left"), Button.left)
-                mouse.click(btn)
+                pressed = command.get("pressed", True)
+                if pressed:
+                    mouse.press(btn)
+                else:
+                    mouse.release(btn)
+            elif cmd_type == "mouse_scroll":
+                mouse.scroll(command.get("dx", 0), command.get("dy", 0))
+            elif cmd_type == "mouse_drag_start":
+                btn_map = {"left": Button.left, "right": Button.right, "middle": Button.middle}
+                btn = btn_map.get(command.get("button", "left"), Button.left)
+                mouse.press(btn)
+            elif cmd_type == "mouse_drag_end":
+                btn_map = {"left": Button.left, "right": Button.right, "middle": Button.middle}
+                btn = btn_map.get(command.get("button", "left"), Button.left)
+                mouse.release(btn)
+            elif cmd_type == "screen_switch":
+                pass
             elif cmd_type == "key_press":
                 key = _parse_key(command.get("key", ""))
                 if key:

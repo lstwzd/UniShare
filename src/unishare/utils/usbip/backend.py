@@ -81,23 +81,67 @@ class USBIPBackend:
         usbip_server.stop()
 
     def export_device(self, busid: str) -> bool:
-        return True
+        """导出本地 USB 设备"""
+        try:
+            import usb.core
+            parts = busid.split('-')
+            if len(parts) != 2:
+                return False
+            
+            bus = int(parts[0])
+            addr = int(parts[1])
+            
+            dev = usb.core.find(bus=bus, address=addr)
+            if dev is None:
+                return False
+            
+            usbip_server._pyusb_devices[busid] = dev
+            
+            usbip_dev = USBIPDevice()
+            usbip_dev.from_pyusb(dev)
+            usbip_server._devices[busid] = usbip_dev
+            
+            return True
+        except Exception:
+            return False
 
     def unexport_device(self, busid: str) -> bool:
-        return True
+        """取消导出设备"""
+        try:
+            if busid in usbip_server._devices:
+                del usbip_server._devices[busid]
+            if busid in usbip_server._pyusb_devices:
+                del usbip_server._pyusb_devices[busid]
+            return True
+        except Exception:
+            return False
 
     def attach_device(self, server_ip: str, busid: str, port: int = 3240) -> bool:
+        """连接远程 USB 设备"""
         try:
             client = USBIPClient()
             if not client.connect(server_ip, port):
                 return False
+            
+            devices = client.list_devices()
+            target_device = None
+            for dev in devices:
+                if dev.get('busid') == busid:
+                    target_device = dev
+                    break
+            
+            if not target_device:
+                client.disconnect()
+                return False
+            
             result = client.import_device(busid)
             client.disconnect()
             return result
-        except:
+        except Exception:
             return False
 
     def detach_device(self, port: int) -> bool:
+        """断开远程 USB 设备"""
         return True
 
 
